@@ -1,0 +1,286 @@
+#!/usr/bin/perl
+#----------------------------------------------------------------------------
+# The contents of this file are subject to the iControl Public License
+# Version 4.5 (the "License"); you may not use this file except in
+# compliance with the License. You may obtain a copy of the License at
+# http://www.f5.com/.
+#
+# Software distributed under the License is distributed on an "AS IS"
+# basis, WITHOUT WARRANTY OF ANY KIND, either express or implied. See
+# the License for the specific language governing rights and limitations
+# under the License.
+#
+# The Original Code is iControl Code and related documentation
+# distributed by F5.
+#
+# The Initial Developer of the Original Code is F5 Networks,
+# Inc. Seattle, WA, USA. Portions created by F5 are Copyright (C) 1996-2003 F5 Networks,
+# Inc. All Rights Reserved.  iControl (TM) is a registered trademark of F5 Networks, Inc.
+#
+# Alternatively, the contents of this file may be used under the terms
+# of the GNU General Public License (the "GPL"), in which case the
+# provisions of GPL are applicable instead of those above.  If you wish
+# to allow use of your version of this file only under the terms of the
+# GPL and not to allow others to use your version of this file under the
+# License, indicate your decision by deleting the provisions above and
+# replace them with the notice and other provisions required by the GPL.
+# If you do not delete the provisions above, a recipient may use your
+# version of this file under either the License or the GPL.
+#----------------------------------------------------------------------------
+#use SOAP::Lite + trace => qw(method debug);
+use SOAP::Lite;
+
+#----------------------------------------------------------------------------
+# Validate Arguments
+#----------------------------------------------------------------------------
+my $BIGIP = $ARGV[0];
+my $User = $ARGV[1];
+my $Pass = $ARGV[2];
+
+sub usage()
+{
+  die ("Usage: LtmConfigToXml.pl host uid pwd\n");
+}
+
+
+if ( ($BIGIP eq "") or ($User eq "") or ($Pass eq "") )
+{
+  usage();
+}
+
+#----------------------------------------------------------------------------
+# Transport Information
+#----------------------------------------------------------------------------
+sub SOAP::Transport::HTTP::Client::get_basic_credentials
+{
+  return "$User" => "$Pass";
+}
+
+$urnMap = {
+    "{urn:iControl}LocalLB.LBMethod" => 1,
+    "{urn:iControl}LocalLB.MonitorRuleType" => 1,
+    "{urn:iControl}LocalLB.ProfileContextType" => 1,
+    "{urn:iControl}LocalLB.ProfileType" => 1,
+    "{urn:iControl}LocalLB.VirtualServer.VirtualServerType" => 1,
+};
+sub SOAP::Deserializer::typecast
+{
+  my ($self, $value, $name, $attrs, $children, $type) = @_;
+  my $retval = undef;
+  if ( 1 == $urnMap->{$type} )
+  {
+    $retval = $value;
+  }
+  return $retval;
+}
+
+sub GetInterface()
+{
+  my ($module, $name) = @_;
+
+  $interface = SOAP::Lite
+    -> uri("urn:iControl:$module/$name")
+    -> readable(1)
+    -> proxy("https://$BIGIP/iControl/iControlPortal.cgi");
+  eval { $interface->transport->http_request->header
+  ( 'Authorization' => 'Basic ' . MIME::Base64::encode("$User:$Pass", '') ); };
+
+  return $interface;
+}
+
+&GetConfigXML();
+
+sub FixEmptyEntries()
+{
+  my @list1 = @_;
+  my @list2;
+
+  my $valid_item = "";
+
+  for $i (0 .. $#list1)
+  {
+
+    $item = @list1[$i];
+    if ( $item ne "" )
+    {
+      $valid_item = $item;
+      break;
+    }
+  }
+
+  for $i (0 .. $#list1)
+  {
+    $item = @list1[$i];
+    if ( $item ne "" ) { push @list2, $item; }
+    else               { push @list2, $valid_item; }
+  }
+  return @list2;
+}
+
+sub GetConfigXML()
+{
+  $LocalLBVirtualServer = &GetInterface("LocalLB", "VirtualServer");
+  $LocalLBPool = &GetInterface("LocalLB", "Pool");
+  $LocalLBPoolMember = &GetInterface("LocalLB", "PoolMember");
+
+  # VS List
+  $soapResponse = $LocalLBVirtualServer->get_list();
+  &checkResponse($soapResponse);
+  @vs_list = @{$soapResponse->result};
+
+  # Destination
+  $soapResponse = $LocalLBVirtualServer->get_destination(
+    SOAP::Data->name (virtual_servers => [@vs_list])
+  );
+  &checkResponse($soapResponse);
+  @destination_list = @{$soapResponse->result};
+
+  # Type
+  $soapResponse = $LocalLBVirtualServer->get_type(
+    SOAP::Data->name (virtual_servers => [@vs_list])
+  );
+  &checkResponse($soapResponse);
+  @vstype_list = @{$soapResponse->result};
+
+  # iRules
+  $soapResponse = $LocalLBVirtualServer->get_rule(
+    SOAP::Data->name (virtual_servers => [@vs_list])
+  );
+  &checkResponse($soapResponse);
+  @rule_listA = @{$soapResponse->result};
+
+  # Profiles
+  $soapResponse = $LocalLBVirtualServer->get_profile(
+    SOAP::Data->name(virtual_servers => [@vs_list])
+  );
+  &checkResponse($soapResponse);
+  @profile_listA = @{$soapResponse->result};
+
+  $soapResponse = $LocalLBVirtualServer->get_persistence_profile(
+    SOAP::Data->name(virtual_servers => [@vs_list])
+  );
+  &checkResponse($soapResponse);
+  @persistenceprofile_listA = @{$soapResponse->result};
+
+  # Pools
+  $soapResponse = $LocalLBVirtualServer->get_default_pool_name(
+    SOAP::Data->name (virtual_servers => [@vs_list])
+  );
+  &checkResponse($soapResponse);
+  @pool_list = @{$soapResponse->result};
+
+  # ensure we don't pass empty entries to the following methods.
+  @pool_list2 = &FixEmptyEntries(@pool_list);
+
+  # Pool Members
+  $soapResponse = $LocalLBPool->get_member(
+    SOAP::Data->name(pool_names => [@pool_list2])
+  );
+  &checkResponse($soapResponse);
+  @member_listA = @{$soapResponse->result};
+
+  # LB Method
+  $soapResponse = $LocalLBPool->get_lb_method(
+    SOAP::Data->name(pool_names => [@pool_list2])
+  );
+  &checkResponse($soapResponse);
+  @lbmethod_list = @{$soapResponse->result};
+
+  $soapResponse = $LocalLBPool->get_monitor_association(
+    SOAP::Data->name(pool_names => [@pool_list2])
+  );
+  &checkResponse($soapResponse);
+  @monitor_list = @{$soapResponse->result};
+
+  print "<?xml version='1.0'?>\n";
+  print "<BIGIPConfig>\n";
+  print "  <LTM>\n";
+  for $i (0 .. $#vs_list)
+  {
+    # vip
+    $vip = @vs_list[$i];
+    $pool = @pool_list[$i];
+    $destination = @destination_list[$i];
+    $vstype = @vstype_list[$i];
+    @rule_list = @{$rule_listA[$i]};
+    @profile_list = @{$profile_listA[$i]};
+    @persistenceprofile_list = @{$persistenceprofile_listA[$i]};
+
+    # pool
+    @member_list = @{$member_listA[$i]};
+    $monitorassociations = @monitor_list[$i];
+    $monitor_rule = $monitorassociations->{"monitor_rule"};
+    $lb_method = $lbmethod_list[$i];
+
+    $daddr = $destination->{"address"};
+    $dport = $destination->{"port"};
+    print "    <virtual_server name='$vip' destination='${address}:${port}' type='$vstype'>\n";
+
+    for $j (0 .. $#rule_list)
+    {
+      $rule = @rule_list[$j];
+      $name = $rule->{"rule_name"};
+      $priority = $rule->{"priority"};
+      print "      <rule name='$name' priority='$priority'/>\n";
+    }
+
+    for $j (0 .. $#profile_list)
+    {
+      $profile = @profile_list[$j];
+      $type = $profile->{"profile_type"};
+      $context = $profile->{"profile_context"};
+      $name = $profile->{"profile_name"};
+      print "      <profile name='$name' type='$type' context='$context'/>\n";
+    }
+
+    for $j (0 .. $#persistenceprofile_list)
+    {
+      $pprofile = @persistenceprofile_list[$j];
+      $name = $pprofile->{"profile_name"};
+      $default = $pprofile->{"default_profile"};
+      print "      <persistenceprofile name='$name' default='$default'/>\n";
+    }
+
+    if ( $pool ne "" )
+    {
+      print "      <pool name='$pool' lb_method='$lb_method'>\n";
+      for $j (0 .. $#member_list)
+      {
+        $member = @member_list[$j];
+        $address = $member->{"address"};
+        $port = $member->{"port"};
+        print "        <member addr='$address' port='$port'/>\n";
+      }
+
+      $type = $monitor_rule->{"type"};
+      $quorum = $monitor_rule->{"quorum"};
+      @templates = @{$monitor_rule->{"monitor_templates"}};
+      print "        <monitors type='$type' quorum='$quorum'>\n";
+      for $j (0 .. $#templates)
+      {
+        $template = @templates[$j];
+        print "          <template name='$template'/>\n";
+      }
+      print "        </monitors>\n";
+
+      print "      </pool>\n";
+    }
+    print "    </virtual_server>\n";
+  }
+  print "  </LTM>\n";
+  print "</BIGIPConfig>\n";
+}
+
+
+#----------------------------------------------------------------------------
+# checkResponse
+#----------------------------------------------------------------------------
+sub checkResponse()
+{
+  my ($soapResponse) = (@_);
+  if ( $soapResponse->fault )
+  {
+    print $soapResponse->faultcode, " ", $soapResponse->faultstring, "\n";
+    exit();
+  }
+}
